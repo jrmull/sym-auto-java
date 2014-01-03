@@ -29,7 +29,9 @@ import java.io.PrintWriter;
 import java.net.Socket;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.logging.ConsoleHandler;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
@@ -172,6 +174,7 @@ public class DirectSymitarSession extends SymitarSession {
 			this.command = command;
 		}
 
+		@SuppressWarnings("unused")
 		public Command(String command, HashMap<String, String> parameters, String data) {
 			super();
 			this.command = command;
@@ -188,6 +191,7 @@ public class DirectSymitarSession extends SymitarSession {
 		}
 
 		// Returns string containing any file data sent in this message
+		@SuppressWarnings("unused")
 		public String getFileData() {
 			
 			if( data.indexOf(Character.toString((char) 253)) != -1 && data.indexOf(Character.toString((char) 254)) != -1)
@@ -207,7 +211,7 @@ public class DirectSymitarSession extends SymitarSession {
 					data += key + "=" + parameters.get(key) + "~";
 
 			data = data.substring(0, data.length() - 1);
-
+			log.fine(Character.toString((char) 0x07) + data.length() + "\r" + data);
 			return Character.toString((char) 0x07) + data.length() + "\r" + data;
 		}
 
@@ -298,6 +302,7 @@ public class DirectSymitarSession extends SymitarSession {
 			if ( cmd.toString().indexOf("User Password NOT changed") != -1){
 				log.info("Please update your password");		//I added in this brief explination to help people
 			}
+
 			return cmd;
 	
 	}
@@ -533,8 +538,515 @@ public class DirectSymitarSession extends SymitarSession {
 		
 		return new RunRepgenResult(seq,time);
 	}
-
 	
+	/**
+     * runRepGenq()
+     * Similar to runRepGen but with added qtime to handle additional scheduled time
+     * Matt Warren
+     */
+	public synchronized RunRepgenResult runRepGenq(String name, int queue, int qtime) {
+   
+		log.fine("#  runRepGenq(" + name + ", " + queue + ", " + qtime + ")");
+		
+		Command cur;
+		int[] queueCounts = new int[10000];
+		boolean[] queueAvailable = new boolean[10000];
+		int seq = -1, time = 0;
+		
+		//We cannot use queueCounts as an availability thing, though it would be nice
+		//The two arrays are parsed separately, queueCounts from the list of queues and whats' in them
+		//queueAvailable is from a separate request saying which ones can actually run repwriters		
+		for( int i = 0; i < queueCounts.length; i++) {
+			queueCounts[i] = -1;
+		}		
+		
+		try{			
+			//Main Menu
+			log.fine("#  send: mm0 (batch)");
+			write("mm0" + (char)27);  //Batch
+			while( !(cur = readNextCommand()).getCommand().equals("Input") ) {}
+			log.fine(cur.toString());
+			
+			// Job File							
+			log.fine("#  send: 0 (Run Job File)");
+			writeAndWaitForInputPrompt("0\r");  //Run Job FIle
+			
+			// Job Name
+			log.fine("#  send: job name " + name);
+			write(name + "\r");  //job name
+			while( !(cur = readNextCommand()).getCommand().equals("Input") ) {
+				String command = cur.getCommand();
+				String type = cur.getParameters().get("Type");
+				String text = cur.getParameters().get("Text");				
+				if ("Error".equals(type)) {
+					log.severe("Job " + name + " failed!  " + text);
+					return new RunRepgenResult(-1,0);
+				}
+				log.fine(cur.toString());
+			}
+			log.fine(cur.toString()); 
+		
+			
+			log.fine("#  send: Y");
+			writeAndWaitForInputPrompt("Y\r");  //batch options
+						
+			log.fine("#  send: Y");
+			writeAndWaitForInputPrompt("Y\r");  //notify on completion
+						
+			log.fine("#  send: 4");
+			writeAndWaitForInputPrompt("4\r");  //queue priority
+						
+			log.fine("#  send: return");
+			writeAndWaitForInputPrompt("\r");  //start date
+			
+			log.fine("#  send: "+ String.format("%04d", qtime));			
+			write( String.format("%04d", qtime) + "\r" );  //Start Time
+						
+			while( !(cur = readNextCommand()).getCommand().equals("Input") ){
+				log.fine(cur.toString());
+				
+				//Determine which batch queues are available
+				if( cur.getParameters().get("Action").equals("DisplayLine") && cur.getParameters().get("Text").contains("Batch Queues Available:")){					
+					String line = cur.getParameters().get("Text");
+					String[] tempQueues = line.substring(line.indexOf(":") + 1).split(",");
+					log.fine("#  queues avail: " + java.util.Arrays.toString(tempQueues)  + "  length: " + tempQueues.length);
+					
+					for( String temp : tempQueues){
+						temp = temp.trim();
+						
+						if( temp.contains("-"))
+						{
+							String[] tempList = temp.split("-");
+							
+							int start = Integer.parseInt(tempList[0].trim());
+							int end = Integer.parseInt(tempList[1].trim());
+							
+							for( int x = start; x <= end; x++){
+								queueAvailable[x]=true;
+							}
+						}
+						else
+						{
+							queueAvailable[Integer.parseInt(temp)] = true;
+						}
+						
+					}			
+				}
+			}
+			log.fine(cur.toString());			
+						
+
+			log.fine("#  send: queue " + queue);
+			//If queue was given, send it, otherwise just send a return
+			if (queue > -1) {  
+				write(Integer.toString(queue));  
+			}
+			writeAndWaitForInputPrompt("\r");   //Batch Queue
+			
+			log.fine("#  send: return");
+			writeAndWaitForInputPrompt("\r");  //Expected System Date
+			
+			log.fine("#  send: return");
+			writeAndWaitForInputPrompt("\r");  //Expected Previous System Date
+			
+			log.fine("#  send: Y");
+			writeAndWaitForInputPrompt("Y\r");  //Okay?
+
+			
+			//Find the job in the batch queue and grab the seq number for later use			
+			int newestTime = 0;
+			Command getQueues = new Command("Misc");
+			getQueues.getParameters().put("InfoType", "BatchQueues");
+			log.fine("# send getQueues");
+			write(getQueues);
+			while( (cur = readNextCommand()).getParameters().get("Done") == null ){
+								
+				//Get the Sequence for the latest running one at this point, and return it so we can keep track of it
+				if( cur.getParameters().get("Action").equals("QueueEntry") ){
+					log.fine(cur.toString());
+					if( cur.getParameters().get("Stat").equals("Scheduled") ){
+						//no seq can be given since we are scheduling the job, default to 9999
+						seq = 9999;
+						int aTime = 0;
+						String timeStr = cur.getParameters().get("AfterTime");
+						aTime = Integer.parseInt(timeStr.substring(timeStr.lastIndexOf(":")+1));
+						aTime += 60 * Integer.parseInt(timeStr.substring(timeStr.indexOf(":")+1, timeStr.lastIndexOf(":")));
+						aTime += 3600 * Integer.parseInt(timeStr.substring(0,timeStr.indexOf(":")));
+						time = aTime;
+					}
+					else {
+						int curTime = 0;
+						String timeStr = cur.getParameters().get("Time");
+						curTime = Integer.parseInt(timeStr.substring(timeStr.lastIndexOf(":")+1));
+						curTime += 60 * Integer.parseInt(timeStr.substring(timeStr.indexOf(":")+1, timeStr.lastIndexOf(":")));
+						curTime += 3600 * Integer.parseInt(timeStr.substring(0,timeStr.indexOf(":")));
+						
+						if( curTime > newestTime )
+						{
+							newestTime = curTime;
+							seq = Integer.parseInt(cur.getParameters().get("Seq"));
+							time = curTime;
+						}
+					}
+				}
+			}			
+		}
+		catch(Exception e){
+			e.printStackTrace();
+			log.severe("FAIL!  " +  e.getMessage());
+			return new RunRepgenResult(-1,0);
+		}		
+		
+		return new RunRepgenResult(seq,time);
+	}
+	
+	/**
+     * runRepGenp()
+     * Matt Warren
+     * Similar to runRepGenq but with added JobPrompts to handle additional prompts that a job may request input for.
+     * MUST BE EXACT Job prompts to match!  Prompts cannot be variable.  
+     * Prompts and their values cannot have quotes("), pipes(|) or equal signs(=) in them.
+     * Each prompt needs to be separated by the | character.  Prompts must follow in succession as they are sent from the host.
+     * example JobPrompt arg with three prompts:
+     *   Enter Date
+     *   ATM Settlement Date
+     *   Select option: default [2]
+     *   "Enter Date=12312013|ATM Settlement Date=!SYSTEMDATE-2|Select option: default [2]=1"
+     * 
+     * queue and qtime are required arguments but can be -1.
+     */
+	public synchronized RunRepgenResult runRepGenp(String name, int queue, int qtime, String JobPrompts) {
+   
+		log.info("#  runRepGenp(" + name + ", " + queue + ", " + qtime + ", " + JobPrompts +")");
+		
+		Command cur;
+		int[] queueCounts = new int[10000];
+		boolean[] queueAvailable = new boolean[10000];
+		int seq = -1, time = 0;
+		String[] JobDesc = new String[100];
+		String[] JobValue = new String[100];
+		String[] Prompts = new String[100];
+		String[] TPrompts = new String[1];
+		if (JobPrompts.contains("|")){
+			Prompts = JobPrompts.split("\\|");
+		} else {
+			TPrompts[0] = JobPrompts;
+			Prompts = TPrompts;
+		}
+		
+		
+		if (Prompts.length > 0) {
+			String[] tmpJob = new String[2];
+			String[] TtmpJob = new String[2];
+			//split out the prompt names/values found in array
+			//log.info("Prompts Length:" + String.format("%03d", Prompts.length));
+			for( int x = 0;  x < Prompts.length; x++){
+				//log.info("Prompt:"+Prompts[x]+" at index:" + x);
+				if (!(Prompts[x].equals("")) && !(Prompts[x].equals(null))){
+					tmpJob = Prompts[x].split("=");
+					
+					//log.info("tmpJob Length:" +String.format("%03d", tmpJob.length));
+					if (tmpJob.length == 1){
+						TtmpJob[0] = Prompts[x].substring(0, Prompts[x].lastIndexOf("="));
+						TtmpJob[1] = null;
+						tmpJob = TtmpJob;
+					}
+					
+					JobDesc[x] = tmpJob[0];
+					JobValue[x] = tmpJob[1];
+					//log.info("At Prompt:"+JobDesc[x]+" Enter value: "+JobValue[x] + " index:" + x);
+				}
+				
+			}
+		}
+		
+		
+		//We cannot use queueCounts as an availability thing, though it would be nice
+		//The two arrays are parsed separately, queueCounts from the list of queues and whats' in them
+		//queueAvailable is from a separate request saying which ones can actually run repwriters		
+		for( int i = 0; i < queueCounts.length; i++) {
+			queueCounts[i] = -1;
+		}		
+		
+		try{			
+			//Main Menu
+			log.fine("#  send: mm0 (batch)");
+			write("mm0" + (char)27);  //Batch
+			while( !(cur = readNextCommand()).getCommand().equals("Input") ) {}
+			log.info(cur.toString());
+			
+			// Job File							
+			log.fine("#  send: 0 (Run Job File)");
+			writeAndWaitForInputPrompt("0\r");  //Run Job FIle
+			
+			// Job Name
+			log.fine("#  send: job name " + name);
+			write(name + "\r");  //job name
+			while( !(cur = readNextCommand()).getCommand().equals("Input") ) {
+				String command = cur.getCommand();
+				String type = cur.getParameters().get("Type");
+				String text = cur.getParameters().get("Text");				
+				if ("Error".equals(type)) {
+					log.fine("Job " + name + " failed!  " + text);
+					return new RunRepgenResult(-1,0);
+				}
+				log.fine(cur.toString());
+			}
+			log.fine(cur.toString()); 
+		
+			
+			log.fine("#  send: Y");
+			writeAndWaitForInputPrompt("Y\r");  //batch options
+						
+			log.fine("#  send: Y");
+			writeAndWaitForInputPrompt("Y\r");  //notify on completion
+						
+			log.fine("#  send: 4");
+			writeAndWaitForInputPrompt("4\r");  //queue priority
+						
+			log.fine("#  send: return");
+			writeAndWaitForInputPrompt("\r");  //start date
+			
+			if (qtime > -1) {
+				log.fine("#  send: "+ String.format("%04d", qtime));			
+				write( String.format("%04d", qtime) );  //Start Time
+			}
+			write("\r");
+			
+			while( !(cur = readNextCommand()).getCommand().equals("Input") ){
+				log.fine(cur.toString());
+				
+				//Determine which batch queues are available
+				if( cur.getParameters().get("Action").equals("DisplayLine") && cur.getParameters().get("Text").contains("Batch Queues Available:")){					
+					String line = cur.getParameters().get("Text");
+					String[] tempQueues = line.substring(line.indexOf(":") + 1).split(",");
+					log.fine("#  queues avail: " + java.util.Arrays.toString(tempQueues)  + "  length: " + tempQueues.length);
+					
+					for( String temp : tempQueues){
+						temp = temp.trim();
+						
+						if( temp.contains("-"))
+						{
+							String[] tempList = temp.split("-");
+							
+							int start = Integer.parseInt(tempList[0].trim());
+							int end = Integer.parseInt(tempList[1].trim());
+							
+							for( int x = start; x <= end; x++){
+								queueAvailable[x]=true;
+							}
+						}
+						else
+						{
+							queueAvailable[Integer.parseInt(temp)] = true;
+						}
+						
+					}			
+				}
+			}
+			//log.fine(cur.toString());			
+						
+
+			log.fine("#  send: queue " + queue);
+			//If queue was given, send it, otherwise just send a return
+			if (queue > -1) {  
+				write(Integer.toString(queue));  
+			}
+			
+			if (qtime > -1) {
+				writeAndWaitForInputPrompt("\r");   //Batch Queue
+				log.fine("#  send: return");
+				writeAndWaitForInputPrompt("\r");  //Expected System Date
+				
+				log.fine("#  send: return");
+				write("\r"); //Expected Previous System Date
+			}
+			else {
+				write("\r");   //Batch Queue
+			}
+			 
+			
+			//log.fine(cur.toString());
+			while( (cur = readNextCommand()).getParameters().get("Prompt") == null ){
+				log.fine(cur.toString());
+			}
+			
+			//log.fine("Prompt Length:"+String.format("%04d", Prompts.length));
+			//log.fine(cur.toString());
+			for( int x = 0; x < Prompts.length; x++){ //JobDesc[x] != null
+				//log.fine("x="+ String.format("%01d", x) + " " + JobDesc[x]);
+				if( cur.getParameters().get("Prompt").equals(JobDesc[x]) ){
+					//log.fine(JobDesc[x]+"|"+JobValue[x]);
+					if ((JobValue[x] != null)){
+						//log.fine("#  send: "+ JobValue[x]);
+						write(JobValue[x]+"\r");
+					} else {
+						//log.fine("#  send: nothing "+ JobValue[x]);
+						write("\r");
+					}
+				}
+				while( (cur = readNextCommand()).getParameters().get("Prompt") == null ){
+					log.fine(cur.toString());
+				}
+			}	
+			
+			
+			
+			log.fine("#  send: Y");
+			writeAndWaitForInputPrompt("Y\r");  //Okay?
+
+			
+			//Find the job in the batch queue and grab the seq number for later use			
+			int newestTime = 0;
+			Command getQueues = new Command("Misc");
+			getQueues.getParameters().put("InfoType", "BatchQueues");
+			log.fine("# send getQueues");
+			write(getQueues);
+
+			while( !(cur.getData().contains("~Done"))){ 
+				//Get the Sequence for the latest running one at this point, and return it so we can keep track of it
+				log.fine(cur.toString()+" - In while");
+				if (qtime > -1) {
+					if(cur.getData().contains("Job="+name)){
+						//log.info(cur.toString()+" - In if");
+						if( cur.getData().contains("Stat=Scheduled")){
+							//no seq can be given since we are scheduling the job, default to 9999
+							
+							seq = 9999; 
+							int aTime = 0;
+							String timeStr = cur.getParameters().get("AfterTime");
+							aTime = Integer.parseInt(timeStr.substring(timeStr.lastIndexOf(":")+1));
+							aTime += 60 * Integer.parseInt(timeStr.substring(timeStr.indexOf(":")+1, timeStr.lastIndexOf(":")));
+							aTime += 3600 * Integer.parseInt(timeStr.substring(0,timeStr.indexOf(":")));
+							time = aTime;
+						}
+						else {
+							int curTime = 0;
+							String timeStr = cur.getParameters().get("Time");
+							curTime = Integer.parseInt(timeStr.substring(timeStr.lastIndexOf(":")+1));
+							curTime += 60 * Integer.parseInt(timeStr.substring(timeStr.indexOf(":")+1, timeStr.lastIndexOf(":")));
+							curTime += 3600 * Integer.parseInt(timeStr.substring(0,timeStr.indexOf(":")));
+							
+							if( curTime > newestTime )
+							{
+								newestTime = curTime;
+								seq = Integer.parseInt(cur.getParameters().get("Seq"));
+								time = curTime;
+							}
+						}
+					}
+				} else {
+					if (queue == -1){
+						queue = 0;
+					}
+					if( cur.getData().contains("Stat=Running") && cur.getData().contains("Queue="+Integer.toString(queue))){
+						int curTime = 0;
+						String timeStr = cur.getParameters().get("Time");
+						curTime = Integer.parseInt(timeStr.substring(timeStr.lastIndexOf(":")+1));
+						curTime += 60 * Integer.parseInt(timeStr.substring(timeStr.indexOf(":")+1, timeStr.lastIndexOf(":")));
+						curTime += 3600 * Integer.parseInt(timeStr.substring(0,timeStr.indexOf(":")));
+						
+						if( curTime > newestTime )
+						{
+							newestTime = curTime;
+							seq = Integer.parseInt(cur.getParameters().get("Seq"));
+							time = curTime;
+						}
+					}
+				}
+				
+				cur = readNextCommand();
+			}
+			
+		}
+		catch(Exception e){
+			e.printStackTrace();
+			log.severe("FAIL!  " +  e.getMessage());
+			return new RunRepgenResult(-1,0);
+		}		
+		
+		return new RunRepgenResult(seq,time);
+	}
+	
+	
+	 /**
+     * UnlockConsoles()
+     * Clear all the locked consoles
+     * Josh Marshall
+     * Matt Warren
+     */
+    public synchronized SessionError UnlockConsoles() {
+    log.fine("#  UnlockConsoles");
+    Command cur;
+    int seq = -1, time = 0;
+    String tmpConsole=""; 
+    String tmpString="";
+        try{                    
+            //Main Menu
+            log.fine("#  send: mm6 (Console Control)");
+            write("mm6" + (char)27);  //Console control
+            while( !(cur = readNextCommand()).getCommand().equals("Input") ) {}
+            writeAndWaitForInputPrompt("4\r");  //open to security
+            
+            //while( !(cur = readNextCommand()).getCommand().equals("Input") ) {}
+            log.fine(cur.toString());
+           
+            writeAndWaitForInputPrompt( "\r" );
+            write("1\r");  // reset Locked Console
+            //write("\r");  
+            cur = readNextCommand();
+            log.fine(cur.toString());
+        	log.fine("#  send: looking for locked consoles");
+            while( !(cur.getCommand().equals("Input") )) 
+            {
+            	log.fine(cur.toString());
+				  //get the locked consoles unlock them
+				
+				  if (cur.getCommand().equals("SecControl"))
+				  {
+					  if (cur.getData().contains("ConListItem"))
+					  {
+						  tmpString = cur.getData();//Get the data from the command
+						  
+						  //Get the console numbers from the data and separate with comma if multiple found
+						  if (tmpConsole != ""){
+							  tmpConsole = tmpConsole + "," + tmpString.substring(tmpString.indexOf("~Con=")+5, tmpString.indexOf("~ConName"));
+						  } else {
+							  tmpConsole = tmpString.substring(tmpString.indexOf("~Con=")+5, tmpString.indexOf("~ConName"));
+						  }
+					  }
+
+				  }
+				  cur = readNextCommand();
+            }
+            log.fine(cur.toString());
+            
+            //split out the consoles found into array
+            List<String> items = Arrays.asList(tmpConsole.split(","));
+            
+            //parse through each and unlock
+            for (String s : items){
+            	if (!(s.equals("")))
+                {
+    				  //Console#[0x0d]  
+    				  log.fine("#  send: unlock " + s);
+    				  //log.info(cur.toString());
+    				  writeAndWaitForInputPrompt(s + "\r");//send command back to unlock given console
+    				  //log.info(cur.toString());
+    				  writeAndWaitForInputPrompt("0\r");//ok
+    				  //log.info(cur.toString());
+                }
+            }
+        }
+        catch(Exception e){
+                e.printStackTrace();
+                log.severe("FAIL!  " +  e.getMessage());
+                return SessionError.UNLOCK_CONSOLE_ERROR;
+        }              
+       
+        return SessionError.NONE;
+    }
+    
 	private void writeAndWaitForInputPrompt(String s) {		
 		//log.info("#  writeAndWaitForInputResponse: " + s);
 		try {
@@ -561,7 +1073,7 @@ public class DirectSymitarSession extends SymitarSession {
 
 	@Override
 	/**
-	 * Remeber that batch queue sequence numbers are not related to print queue ones!
+	 * Remember that batch queue sequence numbers are not related to print queue ones!
 	 */
 	public synchronized boolean isSeqRunning(int seq) {
 		Command cur;

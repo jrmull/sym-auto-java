@@ -20,6 +20,8 @@ package com.repdev;
 
 import java.io.File;
 import java.io.FileReader;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Properties;
 import java.util.logging.ConsoleHandler;
 import java.util.logging.Logger;
@@ -53,23 +55,10 @@ public class SymAutoJava
 			
 			//Job name argument required
 			if (args == null || args.length == 0 || args[0] == null || args[0].trim().length() == 0) {
-				log.severe("Job name parameter required!");			
+				log.severe("Job name parameter required! or -unlock to unlock consoles");			
 				System.exit(1);
 			}		
 			String jobName = args[0];
-			
-			
-			//'queue' argument is optional
-			int queue = -1;
-			if (args.length > 1 && args[1] != null && args[1].length() > 0) {
-				try {
-					queue = Integer.parseInt(args[1]);
-				}
-				catch (NumberFormatException e) {
-					log.severe("Invalid queue given: " + args[1] + "    If queue specified, it must be a number greater than or equal to 0");			
-					System.exit(1);
-				}
-			}		
 			
 			//Connect to Symitar
 			session =  new DirectSymitarSession();
@@ -81,24 +70,82 @@ public class SymAutoJava
 			}
 			log.info("Connection established");
 			
-			
-			//Run the Job
-			SymitarFile symFile = new SymitarFile(sym, jobName, FileType.REPGEN);		
-			SymitarSession.RunRepgenResult result =  session.runRepGen(symFile.getName(), queue);	
-			final int seq = result.getSeq();
-			if( seq != -1) {
-				log.info("Job started! " + "  name: " + jobName  + "  seq: " + seq );
-				int retryDelay = 500; //in milliseconds
-				while (session.isSeqRunning(seq)) {
-					log.fine("# job " + seq + " still running... will check again in " + retryDelay + "ms");
-					try { Thread.sleep(retryDelay); } catch (Exception e) {}
+			//if the argument is to unlock consoles do that, otherwise run a job
+            if(jobName.toLowerCase().equals("-unlock"))
+            {
+
+                //Run the Job
+            	error = session.UnlockConsoles();
+                if (error != SessionError.NONE)
+                {
+                    log.severe("Connection failed!  Action: " + jobName + "  server: " + server + " port:" + port +  "  user: " + user +  "  " + error.toString());    
+                    System.exit(1);
+                }
+                
+            }
+            else {
+				//'queue' argument is optional
+				int queue = -1;
+				if (args.length > 1 && args[1] != null && args[1].length() > 0) {
+					try {
+						queue = Integer.parseInt(args[1]);
+					}
+					catch (NumberFormatException e) {
+						log.severe("Invalid queue given: " + args[1] + "    If queue specified, it must be a number greater than or equal to 0");			
+						System.exit(1);
+					}
 				}
-				log.info("### Job Complete!  seq: " + seq + "   name: " + jobName);			
-			}	
-			else {
-				log.severe("Job failed!  " + jobName + "  seq: " + seq);			
-				System.exit(1);
-			}	
+				
+				//'qtime' argument is optional
+				int qtime = -1;
+				if (args.length > 2 && args[2] != null && args[2].length() > 0) {
+					try {
+						qtime = Integer.parseInt(args[2]);
+						log.info("Job Scheduled for : " + qtime);
+					}
+					catch (NumberFormatException e) {
+						log.severe("Invalid time scheduled: " + args[2] + "    If qtime specified, it must be a number greater than or equal to 0");			
+						System.exit(1);
+					}
+				}
+				
+				//'JobPrompts' argument is optional
+				String JobPrompts = "";
+				if (args.length > 3) {
+					log.fine("Prompt args:" + args[3]);
+            		JobPrompts = args[3];
+				}
+				
+				
+				//Run the Job
+				SymitarFile symFile = new SymitarFile(sym, jobName, FileType.REPGEN);
+				int tseq = -1;
+				if (JobPrompts != "") {
+					SymitarSession.RunRepgenResult result =  session.runRepGenp(symFile.getName(), queue, qtime, JobPrompts);
+					tseq = result.getSeq();
+				} else if (qtime != -1){
+					SymitarSession.RunRepgenResult result =  session.runRepGenq(symFile.getName(), queue, qtime);
+					tseq = result.getSeq();
+				} else {
+					SymitarSession.RunRepgenResult result =  session.runRepGen(symFile.getName(), queue);
+					tseq = result.getSeq();
+				}
+				final int seq = tseq;
+				//final int seq = result.getSeq();
+				if( seq != -1) {
+					log.info("Job started! " + "  name: " + jobName  + "  seq: " + seq );
+					int retryDelay = 500; //in milliseconds
+					while (session.isSeqRunning(seq)) {
+						log.fine("# job " + seq + " still running... will check again in " + retryDelay + "ms");
+						try { Thread.sleep(retryDelay); } catch (Exception e) {}
+					}
+					log.info("### Job Complete!  seq: " + seq + "   name: " + jobName);			
+				}	
+				else {
+					log.severe("Job failed!  " + jobName + "  seq: " + seq);			
+					System.exit(1);
+				}	
+            }
 		}	
 		catch (Exception e) {
 			log.severe(e.getMessage());
@@ -118,6 +165,7 @@ public class SymAutoJava
 			throw new Exception("Config file not found: " + filePath);
 		}			
 		
+
 		config.load(new FileReader(f));			
 		return config;
 	}	

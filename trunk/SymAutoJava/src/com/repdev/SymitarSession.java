@@ -104,7 +104,13 @@ public abstract class SymitarSession {
 
 
 	public abstract RunRepgenResult runRepGen(String name, int queue);
-
+	
+	public abstract RunRepgenResult runRepGenq(String name, int queue, int qtime);
+	
+	public abstract RunRepgenResult runRepGenp(String name, int queue, int qtime, String JobPrompts);
+	
+	public abstract SessionError UnlockConsoles();
+	
 	/**
 	 * Interface needed for runRepGen stuff, should maybe be it's own file later
 	 */
