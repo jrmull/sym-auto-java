@@ -1,4 +1,4 @@
-/**
+/** 
  *	SymAutoJava
  *  Copyright 2013, Shane Morrell, Mike Blumenthal
  *
